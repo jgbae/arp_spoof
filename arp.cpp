@@ -216,7 +216,7 @@ void attack(Address_info *addressinfo)
         }
 
         //case 2. Relay
-        else if(eth->eth_type != htons(0x0806) && memcmp(eth->eth_src, addressinfo->senderMac, MAC_ADDR_LEN) == 0)
+        else if(memcmp(eth->eth_src, addressinfo->senderMac, MAC_ADDR_LEN) == 0)
         {
             printf("Packet from sender detected!!! packet size : %d Trying Relay..", header->len);
             memcpy(eth->eth_dst, addressinfo->targetMac, MAC_ADDR_LEN);
